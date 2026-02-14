@@ -58,3 +58,5 @@ VULN_DB = {
     "IIS/6.0": "🚨 [ANCIENT] Server Windows 2003. Risc critic RCE.",
     "WordPress/5.0": "🚨 [CMS] Versiune WordPress veche și vulnerabilă."
 }
+
+# Script made and updated by Keso 
