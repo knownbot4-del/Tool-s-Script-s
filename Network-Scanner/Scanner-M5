@@ -1,120 +1,124 @@
 import socket
 import config
 import requests
+import json  # Importat pentru raport
+import subprocess
+import re
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from VULN_DB import VULN_DB
 
 URL = config.DISCORD_WEBHOOK
-numepc = "127.0.0.1"  # Sau IP-ul pe care vrei sa-l scanezi
+numepc = "127.0.0.1"  # Ținta ta
 
+# Listă globală pentru stocarea rezultatelor în vederea salvării JSON
+scan_results = []
 
 # --- FUNCTII UTILS ---
 
 def detect_os(ip):
-    """
-    Trimite un singur pachet (ping) pentru a citi valoarea TTL
-    """
     try:
-        # Folosim o comandă de sistem pentru un singur ping
-        import subprocess
-        # -c 1 pentru Linux, -n 1 pentru Windows
-        output = subprocess.check_output(f"ping -c 1 {ip}", shell=True, stderr=subprocess.STDOUT).decode()
-        
-        # Căutăm valoarea TTL în output
-        import re
+        # Detectăm platforma pentru a folosi flag-ul corect de ping (-c pentru Linux, -n pentru Windows)
+        import platform
+        param = "-n" if platform.system().lower() == "windows" else "-c"
+        output = subprocess.check_output(f"ping {param} 1 {ip}", shell=True, stderr=subprocess.STDOUT).decode()
+
         ttl_match = re.search(r"ttl=(\d+)", output.lower())
-        
         if ttl_match:
             ttl = int(ttl_match.group(1))
             if ttl <= 64: return "🐧 Linux/Unix (Raspberry Pi / Lubuntu)"
             if ttl <= 128: return "🪟 Windows (Nagasaki / Perla-i3)"
             if ttl <= 255: return "🌐 Network Device (Cisco/Router)"
     except:
-        return "❓ Unknown OS (Host unreachable or blocking ICMP)"
+        return "❓ Unknown OS (Host unreachable/ICMP Blocked)"
     return "❓ Unknown OS"
 
 def send_msg(text):
-    """Trimite notificări pe Discord"""
     try:
-        data = {"content": text}
-        requests.post(URL, json=data)
+        requests.post(URL, json={"content": text})
     except Exception as e:
-        print(f"Eroare la trimiterea mesajului: {e}")
-
+        print(f"Eroare Discord: {e}")
 
 def check_vulnerabilities(banner_text):
-    """Verifică dacă bannerul conține versiuni vulnerabile"""
     for version, threat in VULN_DB.items():
-        # Verificăm dacă cheia este string (pentru versiuni software)
         if isinstance(version, str) and version in banner_text:
             return f"🚨 **VULNERABILITATE GĂSITĂ:** `{version}`\n> ⚠️ *Amenințare:* {threat}"
     return None
 
-
 # --- LOGICA DE SCANARE ---
 
 def scan_port(port):
-    """Funcție de scanare per port"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)  # Un pic mai mult timp pentru banner grabbing
+    s.settimeout(1.5)
 
     try:
         result = s.connect_ex((numepc, port))
 
         if result == 0:
+            port_info = {
+                "port": port,
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "status": "Open",
+                "vulnerabilities": None
+            }
+            
             msg_vuln = ""
-            # Verificăm dacă portul (int) există în VULN_DB
             if port in VULN_DB:
                 info = VULN_DB[port]
+                port_info["vulnerabilities"] = info
                 msg_vuln = (f"⚠️ **[ VULN DB MATCH ]**\n"
-                            f"Port: `{port}` ({info.get('service', 'N/A')})\n"
-                            f"Risc: `{info.get('risk', 'UNKNOWN')}`\n"
-                            f"Descriere: {info.get('description', '-')}")
-                print(f"!!! VULN gasita pe portul {port}")
-
-            print(f"✅ [+] Portul {port} este DESCHIS.")
+                            f"Port: `{port}` ({info.get('service')})\n"
+                            f"Risc: `{info.get('risk')}`")
 
             # Banner Grabbing
-            banner_text = ""
+            banner_text = "N/A"
             try:
-                # Trimitem o cerere generică pentru a forța un răspuns
                 s.send(b"Hello\r\n")
                 banner = s.recv(1024)
                 if banner:
                     banner_text = banner.decode(errors='ignore').strip()
             except:
-                banner_text = "N/A"
+                pass
+            
+            port_info["banner"] = banner_text
+            scan_results.append(port_info) # Salvăm în listă pentru JSON
 
-            # Construim raportul final pentru acest port
-            report = f"🎯 **{numepc}:{port}**\n"
-            report += f"✅ Port DESCHIS"
-
-            if msg_vuln:
-                report += f"\n{msg_vuln}"
-
-            if banner_text and banner_text != "N/A":
-                report += f"\n📜 **Banner:** `{banner_text[:100]}`"
-                # Verificăm dacă bannerul are vulnerabilități soft
-                vuln_soft = check_vulnerabilities(banner_text)
-                if vuln_soft:
-                    report += f"\n{vuln_soft}"
-
-            # Trimitem totul pe Discord
+            # Trimitem raportul pe Discord
+            report = f"🎯 **{numepc}:{port}**\n✅ Port DESCHIS"
+            if msg_vuln: report += f"\n{msg_vuln}"
+            if banner_text != "N/A": report += f"\n📜 **Banner:** `{banner_text[:100]}`"
+            
             send_msg(report)
+            print(f"✅ [+] Port {port} raportat.")
 
     except Exception as e:
-        print(f"Eroare la scanarea portului {port}: {e}")
+        pass
     finally:
         s.close()
 
+# --- SALVARE RAPORT ---
+
+def save_json_report():
+    filename = f"scan_{numepc.replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    report_data = {
+        "target": numepc,
+        "os_detected": detect_os(numepc),
+        "scan_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "open_ports": scan_results
+    }
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(report_data, f, indent=4)
+    print(f"\n📊 Raport salvat în: {filename}")
 
 # --- MAIN ---
 
 if __name__ == "__main__":
-    print(f"🚀 Pornim scanarea TURBO (50 threads) pe {numepc}...")
+    os_info = detect_os(numepc)
+    print(f"🚀 Pornim scanarea pe {numepc} ({os_info})...")
+    send_msg(f"🏁 **Start Scanare:** `{numepc}`\n🕵️ **OS Detectat:** {os_info}")
 
     with ThreadPoolExecutor(max_workers=50) as executor:
-        # Scanăm porturile cele mai comune + cele din VULN_DB
         executor.map(scan_port, range(1, 1025))
 
-    print("🏁 Gata! Toate porturile au fost verificate.")
+    save_json_report()
+    print("🏁 Gata! Raportul JSON a fost generat.")
